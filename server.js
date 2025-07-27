@@ -8,8 +8,9 @@ import bcrypt from "bcryptjs";
 import multer from "multer";
 import csv from "csv-parser";
 import fs from "fs";
-import nodemailer from "nodemailer"; // ✅ NEW: For sending emails
 import XLSX from 'xlsx';
+import mongoose from 'mongoose';
+import nodemailer from "nodemailer"; // ✅ FIX: Added the missing import for sending emails
 
 import connectDB from "./config/db.js";
 import User from "./models/User.js";
@@ -18,7 +19,7 @@ import Campaign from "./models/Campaign.js";
 import Ticket from "./models/Ticket.js";
 import Announcement from "./models/Announcement.js";
 import Notification from "./models/Notification.js";
-import Otp from "./models/Otp.js"; // ✅ NEW: Import the OTP model
+import Otp from "./models/Otp.js";
 
 dotenv.config();
 
@@ -51,6 +52,14 @@ const protect = (req, res, next) => {
   } else {
     res.status(401).json({ message: "Not authorized, no token" });
   }
+};
+
+const adminOnly = (req, res, next) => {
+    if (req.user && req.user.role === 'Admin') {
+        next();
+    } else {
+        res.status(403).json({ message: 'Not authorized as an admin.' });
+    }
 };
 
 // Helper function to create notifications up the hierarchy
@@ -943,14 +952,6 @@ app.put('/api/notifications/:id/read', protect, async (req, res) => {
 // ===================================================
 // BACKUP & DATA MANAGEMENT API (ADMIN ONLY)
 // ===================================================
-const adminOnly = (req, res, next) => {
-    if (req.user && req.user.role === 'Admin') {
-        next();
-    } else {
-        res.status(403).json({ message: 'Not authorized as an admin.' });
-    }
-};
-
 app.post('/api/backup/generate-download', protect, adminOnly, async (req, res) => {
     try {
         const users = await User.find({}).lean();
@@ -1156,6 +1157,69 @@ app.post("/api/reset-password", async (req, res) => {
         res.json({ message: "Password has been reset successfully." });
     } catch (error) {
         res.status(500).json({ message: "Server error while resetting password." });
+    }
+});
+
+
+// ===================================================
+// STORAGE MANAGEMENT API (ADMIN ONLY)
+// ===================================================
+
+// Helper function to recursively calculate the size of a directory
+const getDirectorySize = (dirPath) => {
+    let size = 0;
+    const files = fs.readdirSync(dirPath);
+    for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        const stats = fs.statSync(filePath);
+        if (stats.isFile()) {
+            size += stats.size;
+        } else if (stats.isDirectory()) {
+            size += getDirectorySize(filePath);
+        }
+    }
+    return size;
+};
+
+app.get('/api/admin/storage-usage', protect, adminOnly, async (req, res) => {
+    try {
+        // 1. Calculate File Storage Usage
+        const uploadsPath = path.join(__dirname, 'uploads');
+        const fileStorageBytes = fs.existsSync(uploadsPath) ? getDirectorySize(uploadsPath) : 0;
+
+        // 2. Calculate Database Storage Usage for each collection
+        const collections = mongoose.connection.collections;
+        const dbStats = await Promise.all(
+            Object.values(collections).map(async (collection) => {
+                const stats = await collection.stats();
+                return {
+                    name: collection.collectionName,
+                    sizeBytes: stats.size,
+                    count: stats.count
+                };
+            })
+        );
+        
+        const totalDbSizeBytes = dbStats.reduce((sum, stat) => sum + stat.sizeBytes, 0);
+
+        res.json({
+            fileStorage: {
+                bytes: fileStorageBytes,
+                megabytes: (fileStorageBytes / (1024 * 1024)).toFixed(2)
+            },
+            databaseStorage: {
+                bytes: totalDbSizeBytes,
+                megabytes: (totalDbSizeBytes / (1024 * 1024)).toFixed(2),
+                collections: dbStats.map(stat => ({
+                    ...stat,
+                    sizeMegabytes: (stat.sizeBytes / (1024 * 1024)).toFixed(4)
+                }))
+            }
+        });
+
+    } catch (error) {
+        console.error("Storage usage calculation error:", error);
+        res.status(500).json({ message: 'Server error calculating storage usage.' });
     }
 });
 
