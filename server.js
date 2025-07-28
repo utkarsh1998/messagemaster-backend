@@ -10,7 +10,7 @@ import csv from "csv-parser";
 import fs from "fs";
 import XLSX from 'xlsx';
 import mongoose from 'mongoose';
-import nodemailer from "nodemailer"; // ✅ FIX: Added the missing import for sending emails
+import nodemailer from "nodemailer";
 
 import connectDB from "./config/db.js";
 import User from "./models/User.js";
@@ -1188,12 +1188,13 @@ app.get('/api/admin/storage-usage', protect, adminOnly, async (req, res) => {
         const fileStorageBytes = fs.existsSync(uploadsPath) ? getDirectorySize(uploadsPath) : 0;
 
         // 2. Calculate Database Storage Usage for each collection
-        const collections = mongoose.connection.collections;
+        const db = mongoose.connection.db;
+        const collections = await db.listCollections().toArray();
         const dbStats = await Promise.all(
-            Object.values(collections).map(async (collection) => {
-                const stats = await collection.stats();
+            collections.map(async (collection) => {
+                const stats = await db.collection(collection.name).stats();
                 return {
-                    name: collection.collectionName,
+                    name: collection.name,
                     sizeBytes: stats.size,
                     count: stats.count
                 };
