@@ -11,6 +11,7 @@ import fs from "fs";
 import XLSX from 'xlsx';
 import mongoose from 'mongoose';
 import nodemailer from "nodemailer";
+import { BSON } from 'bson';
 
 import connectDB from "./config/db.js";
 import User from "./models/User.js";
@@ -1206,22 +1207,22 @@ app.get('/api/admin/storage-usage', protect, adminOnly, async (req, res) => {
 
         // 2. Calculate Database Storage Usage using a more reliable method
         const db = mongoose.connection.db;
+        const dbStatsCommand = await db.command({ dbStats: 1 });
+        const totalDbSizeBytes = dbStatsCommand.storageSize || 0;
+
         const collectionsData = await db.listCollections().toArray();
         const collectionNames = collectionsData.map(c => c.name);
 
-        const dbStats = await Promise.all(
+        const collectionDetails = await Promise.all(
             collectionNames.map(async (name) => {
-                const stats = await db.command({ collStats: name });
+                const count = await db.collection(name).countDocuments();
                 return {
                     name: name,
-                    sizeBytes: stats.size,
-                    count: stats.count
+                    count: count
                 };
             })
         );
         
-        const totalDbSizeBytes = dbStats.reduce((sum, stat) => sum + stat.sizeBytes, 0);
-
         res.json({
             fileStorage: {
                 bytes: fileStorageBytes,
@@ -1230,10 +1231,7 @@ app.get('/api/admin/storage-usage', protect, adminOnly, async (req, res) => {
             databaseStorage: {
                 bytes: totalDbSizeBytes,
                 megabytes: (totalDbSizeBytes / (1024 * 1024)).toFixed(2),
-                collections: dbStats.map(stat => ({
-                    ...stat,
-                    sizeMegabytes: (stat.sizeBytes / (1024 * 1024)).toFixed(4)
-                }))
+                collections: collectionDetails
             }
         });
 
