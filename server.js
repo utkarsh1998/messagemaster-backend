@@ -1036,38 +1036,51 @@ app.post('/api/backup/save-to-server', protect, adminOnly, async (req, res) => {
 app.delete('/api/data/cleanup', protect, adminOnly, async (req, res) => {
     try {
         const { dataType, fromDate, toDate } = req.body;
+        const startDate = new Date(fromDate);
+        const endDate = new Date(toDate);
+        endDate.setHours(23, 59, 59, 999);
 
-        if (dataType !== 'campaigns') {
-            return res.status(400).json({ message: 'Only campaign cleanup is currently supported.' });
-        }
+        let count = 0;
 
-        const campaignsToDelete = await Campaign.find({
-            createdAt: { $gte: new Date(fromDate), $lte: new Date(toDate) }
-        });
-
-        for (const campaign of campaignsToDelete) {
-            const filesToDelete = [
-                campaign.dp, 
-                campaign.singleCreative, 
-                campaign.pdf, 
-                campaign.video, 
-                campaign.audio, 
-                ...(campaign.images || [])
-            ];
-
-            for (const file of filesToDelete) {
-                if (file) {
-                    const filepath = path.join(__dirname, 'uploads', path.basename(file));
-                    if (fs.existsSync(filepath)) {
-                        fs.unlinkSync(filepath);
+        switch (dataType) {
+            case 'campaigns':
+                const campaignsToDelete = await Campaign.find({ createdAt: { $gte: startDate, $lte: endDate } });
+                for (const campaign of campaignsToDelete) {
+                    const filesToDelete = [campaign.dp, campaign.singleCreative, campaign.pdf, campaign.video, campaign.audio, ...(campaign.images || [])];
+                    for (const file of filesToDelete) {
+                        if (file) {
+                            const filepath = path.join(__dirname, 'uploads', path.basename(file));
+                            if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+                        }
                     }
+                    await Campaign.findByIdAndDelete(campaign._id);
                 }
-            }
-            await Campaign.findByIdAndDelete(campaign._id);
+                count = campaignsToDelete.length;
+                break;
+
+            case 'users':
+                const usersToDelete = await User.find({ role: { $ne: 'Admin' }, createdAt: { $gte: startDate, $lte: endDate } });
+                for (const user of usersToDelete) {
+                    await CreditTransaction.deleteMany({ to: user.email });
+                    await Campaign.deleteMany({ userEmail: user.email });
+                    await Ticket.deleteMany({ userEmail: user.email });
+                    await User.findByIdAndDelete(user._id);
+                }
+                count = usersToDelete.length;
+                break;
+
+            case 'transactions':
+                const result = await CreditTransaction.deleteMany({ createdAt: { $gte: startDate, $lte: endDate } });
+                count = result.deletedCount;
+                break;
+
+            default:
+                return res.status(400).json({ message: 'Invalid data type for cleanup.' });
         }
 
-        res.json({ message: `${campaignsToDelete.length} campaigns and their associated files have been deleted.` });
+        res.json({ message: `${count} ${dataType} records have been permanently deleted.` });
     } catch (error) {
+        console.error("Cleanup Error:", error);
         res.status(500).json({ message: 'Error during data cleanup.' });
     }
 });
@@ -1168,15 +1181,19 @@ app.post("/api/reset-password", async (req, res) => {
 // Helper function to recursively calculate the size of a directory
 const getDirectorySize = (dirPath) => {
     let size = 0;
-    const files = fs.readdirSync(dirPath);
-    for (const file of files) {
-        const filePath = path.join(dirPath, file);
-        const stats = fs.statSync(filePath);
-        if (stats.isFile()) {
-            size += stats.size;
-        } else if (stats.isDirectory()) {
-            size += getDirectorySize(filePath);
+    try {
+        const files = fs.readdirSync(dirPath);
+        for (const file of files) {
+            const filePath = path.join(dirPath, file);
+            const stats = fs.statSync(filePath);
+            if (stats.isFile()) {
+                size += stats.size;
+            } else if (stats.isDirectory()) {
+                size += getDirectorySize(filePath);
+            }
         }
+    } catch (e) {
+        // Ignore errors if directory doesn't exist
     }
     return size;
 };
@@ -1185,16 +1202,18 @@ app.get('/api/admin/storage-usage', protect, adminOnly, async (req, res) => {
     try {
         // 1. Calculate File Storage Usage
         const uploadsPath = path.join(__dirname, 'uploads');
-        const fileStorageBytes = fs.existsSync(uploadsPath) ? getDirectorySize(uploadsPath) : 0;
+        const fileStorageBytes = getDirectorySize(uploadsPath);
 
-        // 2. Calculate Database Storage Usage for each collection
+        // 2. Calculate Database Storage Usage using a more reliable method
         const db = mongoose.connection.db;
-        const collections = await db.listCollections().toArray();
+        const collectionsData = await db.listCollections().toArray();
+        const collectionNames = collectionsData.map(c => c.name);
+
         const dbStats = await Promise.all(
-            collections.map(async (collection) => {
-                const stats = await db.collection(collection.name).stats();
+            collectionNames.map(async (name) => {
+                const stats = await db.command({ collStats: name });
                 return {
-                    name: collection.name,
+                    name: name,
                     sizeBytes: stats.size,
                     count: stats.count
                 };
